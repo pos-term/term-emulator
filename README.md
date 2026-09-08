@@ -1,5 +1,7 @@
 # term-emulator
 
+> **Язык / Language:** Русский | [English](i18n/en/README.md)
+
 Эмулятор POS-терминала на Raspberry Pi: приём суммы и подтверждения операции через GPIO (кнопки/энкодер), индикация статуса транзакции, локальная очередь событий при потере сети и публикация транзакций в Kafka.
 
 > Общая информация по проекту и участниках: https://github.com/pos-term/.github/blob/main/profile/README.md
