@@ -30,6 +30,7 @@ go.work.sum
 # Local Raspberry Pi disk images
 /img/*.img
 /img/*.img.xz
+/.qemu/
 
 # Editor/IDE
 # .idea/
