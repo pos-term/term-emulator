@@ -112,9 +112,10 @@ def main():
         elif args.user:
             parser.error("--user applies when creating a new local SD card.")
         root = (vm / "root-device").read_text()
+        # Keep the kernel's Pi power-off handler, but leave the watchdog timer off in systemd.
         cmdline = (
             f"console=ttyAMA1,115200 root={root} rootfstype=ext4 fsck.repair=yes rootwait rw "
-            "initcall_blacklist=bcm2835_wdt_driver_init "
+            "systemd.watchdog_sec=off "
             "systemd.mask=systemd-networkd-wait-online.service"
         )
         os.chdir(vm)
