@@ -32,6 +32,9 @@ go.work.sum
 /img/*.img.xz
 /.qemu/
 
+# macOS
+.DS_Store
+
 # Editor/IDE
 # .idea/
 # .vscode/
