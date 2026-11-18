@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Boot a local Raspberry Pi OS Lite image in QEMU on macOS."""
+
+import argparse
+import fcntl
+import gzip
+import os
+from pathlib import Path
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+REPO = Path(__file__).resolve().parent.parent
+DTB = "bcm2711-rpi-4-b.dtb"
+
+
+def prepare_disk(image, vm, username):
+    print(f"Preparing a local SD card from {image.name}...", flush=True)
+    with tempfile.TemporaryDirectory(dir=vm.parent) as directory:
+        staging = Path(directory) / "vm"
+        staging.mkdir()
+        disk = staging / "sd.img"
+        subprocess.run(["cp", "-c", image, disk], check=True)
+        # QEMU's SD controller requires a power-of-two disk size.
+        with disk.open("r+b") as card:
+            card.truncate(1 << (disk.stat().st_size - 1).bit_length())
+
+        attach = ["hdiutil", "attach", "-nomount", "-noautofsck", "-plist",
+                  "-imagekey", "diskimage-class=CRawDiskImage"]
+        if not username:
+            attach.append("-readonly")
+        entities = plistlib.loads(subprocess.check_output([*attach, disk]))["system-entities"]
+        whole_disk = next(entity["dev-entry"] for entity in entities
+                          if re.fullmatch(r"/dev/disk\d+", entity["dev-entry"]))
+        try:
+            boot = next((entity["dev-entry"] for entity in entities
+                         if entity.get("volume-kind") == "msdos"), None)
+            if not boot:
+                raise ValueError("The image has no FAT boot partition.")
+            mount = Path(directory) / "bootfs"
+            mount.mkdir()
+            mount_command = ["diskutil", "mount"]
+            if not username:
+                mount_command.append("readOnly")
+            subprocess.run([*mount_command, "-mountPoint", mount, boot],
+                           check=True, stdout=subprocess.DEVNULL)
+            root = re.search(r"\broot=(PARTUUID=[\da-fA-F]+-[\da-fA-F]+)\b",
+                             (mount / "cmdline.txt").read_text())
+            if not root:
+                raise ValueError("The image's cmdline.txt has no root PARTUUID.")
+            (staging / "root-device").write_text(root[1])
+            with (mount / "kernel8.img").open("rb") as kernel:
+                compressed = kernel.read(2) == b"\x1f\x8b"
+                kernel.seek(0)
+                source = gzip.GzipFile(fileobj=kernel) if compressed else kernel
+                with source, (staging / "Image").open("wb") as output:
+                    shutil.copyfileobj(source, output)
+            shutil.copyfile(mount / DTB, staging / DTB)
+            if username:
+                if any((mount / name).exists() for name in ("userconf", "userconf.txt")):
+                    raise ValueError("The image already provides a first-boot user.")
+                print(f"Choose a password for {username}.", flush=True)
+                password_hash = subprocess.check_output(["openssl", "passwd", "-6"], text=True)
+                if not password_hash.startswith("$6$"):
+                    raise ValueError("OpenSSL did not return a SHA-512 password hash.")
+                (mount / "userconf.txt").write_text(f"{username}:{password_hash.strip()}\n")
+        finally:
+            subprocess.run(["hdiutil", "detach", whole_disk],
+                           check=True, stdout=subprocess.DEVNULL)
+
+        # QEMU exposes PL011 as the terminal; the stock DTB assigns it to Bluetooth.
+        subprocess.run(["fdtput", "-t", "s", staging / DTB,
+                        "/soc/serial@7e201000/bluetooth", "status", "disabled"], check=True)
+        staging.rename(vm)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("image", type=Path, nargs="?", help="unpacked Raspberry Pi OS .img")
+    parser.add_argument("--user", help="set up the first user when creating a new local SD card")
+    args = parser.parse_args()
+    if sys.platform != "darwin":
+        parser.error("This launcher uses macOS disk image tools.")
+    for executable in ("qemu-system-aarch64", "fdtput"):
+        if not shutil.which(executable):
+            parser.error(f"{executable} is required. Install QEMU with Homebrew.")
+    if args.user and (args.user == "root" or not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", args.user)):
+        parser.error("Use a lowercase username starting with a letter, up to 31 characters.")
+    if args.image is None:
+        images = list((REPO / "img").glob("*.img"))
+        if len(images) != 1:
+            parser.error("Put one unpacked Raspberry Pi OS image in img/ or pass its path.")
+        args.image = images[0]
+    image = args.image.resolve()
+    if not image.is_file():
+        parser.error(f"Image does not exist: {image}")
+
+    os.umask(0o077)
+    vm = REPO / ".qemu" / image.name
+    vm.parent.mkdir(exist_ok=True)
+    with (vm.parent / f"{image.name}.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            parser.error("This virtual machine is already in use.")
+        if not vm.exists():
+            prepare_disk(image, vm, args.user)
+        elif args.user:
+            parser.error("--user applies when creating a new local SD card.")
+        root = (vm / "root-device").read_text()
+        cmdline = (
+            f"console=ttyAMA1,115200 root={root} rootfstype=ext4 fsck.repair=yes rootwait rw "
+            "initcall_blacklist=bcm2835_wdt_driver_init "
+            "systemd.mask=systemd-networkd-wait-online.service"
+        )
+        os.chdir(vm)
+        os.set_inheritable(lock.fileno(), True)
+        command = [
+            "qemu-system-aarch64", "-M", "raspi4b", "-m", "2G", "-smp", "4",
+            "-kernel", "Image", "-dtb", DTB, "-append", cmdline,
+            "-drive", "file=sd.img,format=raw,if=sd", "-nic", "none",
+            "-display", "none", "-serial", "mon:stdio",
+        ]
+        os.execvp(command[0], command)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        sys.exit(f"run_pi_macos: {error}")
