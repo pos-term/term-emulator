@@ -26,7 +26,7 @@ Sign in when `raspberrypi login:` appears. The launcher creates a working disk u
 ./scripts/run_pi_macos
 ```
 
-If `img/` contains multiple images, pass the path to the desired `.img` as an argument. QEMU runs offline. To shut down cleanly, run `sudo poweroff` inside the guest.
+If `img/` contains multiple images, pass the path to the desired `.img` as an argument. The guest gets its address through DHCP on the QEMU user network. To shut down cleanly, run `sudo poweroff` inside the guest.
 
 ## Entering a payment and opening the local queue
 
@@ -58,6 +58,51 @@ With the default `payment-processor` settings, use `submit` to check both outcom
 Build the executable for 64-bit Raspberry Pi OS and copy it to the Pi.
 
 ```sh
-mkdir -p .terminal
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o .terminal/terminal-linux-arm64 ./cmd/terminal
+mkdir -p .terminal/pi
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o .terminal/pi/terminal ./cmd/terminal
+```
+
+## Testing payments in Raspberry Pi OS under QEMU
+
+Use 64-bit Raspberry Pi OS Lite based on Debian 13 (Trixie) for the guest. On macOS, start `infra` with a Kafka address the guest can use from the broker metadata. Then serve the ARM64 executable from a separate console.
+
+```sh
+KAFKA_EXTERNAL_HOST=10.0.2.2 docker compose -f ../infra/docker-compose.yml up -d --build payment-processor
+python3 -m http.server 8000 --bind 127.0.0.1 --directory .terminal/pi
+```
+
+After signing in to the guest, wait for the IPv4 address `10.0.2.15`, then check the route, Kafka port and time. The launcher passes the macOS time to systemd at boot. Compare `date -u` with the host before submitting the first payment, especially after pausing the VM.
+
+```sh
+ip -br -4 addr
+ip -4 route get 10.0.2.2
+timeout 5 bash -c 'exec 3<>/dev/tcp/10.0.2.2/9094'
+date -u
+```
+
+If the clocks differ and NTP has yet to synchronize, set the time from the HTTP `Date` header returned by the macOS server.
+
+```sh
+host_date=$(curl -fsSI http://10.0.2.2:8000/terminal | sed -n 's/^Date: //p' | tr -d '\r')
+test -n "$host_date" && sudo date -u -s "$host_date"
+```
+
+If `kcat` is installed in the guest, run `kcat -b 10.0.2.2:9094 -L` to verify that Kafka advertises `10.0.2.2:9094`. The terminal uses this address to send payments and read results.
+
+```sh
+curl -fSLo terminal http://10.0.2.2:8000/terminal
+chmod +x terminal
+./terminal -brokers 10.0.2.2:9094 run >terminal.log 2>&1 &
+worker=$!
+./terminal submit
+```
+
+Enter `150.50` and `y`, then repeat `submit` with `100000.01`. Once both decisions appear in `terminal.log`, inspect the saved payments and shut down the guest.
+
+```sh
+cat terminal.log
+./terminal list
+kill -TERM "$worker"
+wait "$worker"
+sudo poweroff
 ```

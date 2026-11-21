@@ -26,7 +26,7 @@
 ./scripts/run_pi_macos
 ```
 
-Если в `img/` несколько образов, передайте путь к нужному `.img` аргументом. QEMU пока запускается без сети. Для штатного завершения выполните `sudo poweroff` внутри гостя.
+Если в `img/` несколько образов, передайте путь к нужному `.img` аргументом. Гость получает адрес через DHCP в пользовательской сети QEMU. Для штатного завершения выполните `sudo poweroff` внутри гостя.
 
 ## Ввод платежа и локальная очередь
 
@@ -58,6 +58,51 @@ go run ./cmd/terminal -brokers localhost:9094 run
 Для Raspberry Pi OS 64-bit соберите бинарник и перенесите его на Pi.
 
 ```sh
-mkdir -p .terminal
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o .terminal/terminal-linux-arm64 ./cmd/terminal
+mkdir -p .terminal/pi
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o .terminal/pi/terminal ./cmd/terminal
+```
+
+## Проверка платежа в Raspberry Pi OS под QEMU
+
+Для гостя используйте Raspberry Pi OS Lite 64-bit на базе Debian 13 (Trixie). На macOS запустите `infra` с адресом Kafka, доступным гостю в метаданных брокера. Затем раздайте собранный ARM64-бинарник из отдельной консоли.
+
+```sh
+KAFKA_EXTERNAL_HOST=10.0.2.2 docker compose -f ../infra/docker-compose.yml up -d --build payment-processor
+python3 -m http.server 8000 --bind 127.0.0.1 --directory .terminal/pi
+```
+
+После входа в гостя дождитесь IPv4-адреса `10.0.2.15`, затем проверьте маршрут, порт Kafka и время. Лаунчер передаёт время macOS в systemd при загрузке. Сверьте `date -u` с хостом перед первым платежом, особенно после паузы VM.
+
+```sh
+ip -br -4 addr
+ip -4 route get 10.0.2.2
+timeout 5 bash -c 'exec 3<>/dev/tcp/10.0.2.2/9094'
+date -u
+```
+
+Если часы расходятся и NTP ещё не синхронизировался, выставьте время по HTTP-заголовку `Date` от запущенного на macOS сервера.
+
+```sh
+host_date=$(curl -fsSI http://10.0.2.2:8000/terminal | sed -n 's/^Date: //p' | tr -d '\r')
+test -n "$host_date" && sudo date -u -s "$host_date"
+```
+
+Если в госте установлен `kcat`, команда `kcat -b 10.0.2.2:9094 -L` позволяет проверить, что Kafka объявляет `10.0.2.2:9094`. Следующие команды используют этот адрес для отправки и чтения результатов.
+
+```sh
+curl -fSLo terminal http://10.0.2.2:8000/terminal
+chmod +x terminal
+./terminal -brokers 10.0.2.2:9094 run >terminal.log 2>&1 &
+worker=$!
+./terminal submit
+```
+
+Введите `150.50` и `y`, затем повторите `submit` с `100000.01`. После появления решений в `terminal.log` проверьте сохранённые платежи и завершите гостя.
+
+```sh
+cat terminal.log
+./terminal list
+kill -TERM "$worker"
+wait "$worker"
+sudo poweroff
 ```
