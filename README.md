@@ -41,7 +41,21 @@ go run ./cmd/terminal list
 
 По умолчанию используется база `.terminal/queue.db` и терминал `term-001`. Путь и идентификатор можно задать флагами перед командой, например `go run ./cmd/terminal -db ./demo.db -terminal-id term-002 list`.
 
-Для Raspberry Pi OS 64-bit соберите бинарник. После переноса на Pi запускайте его с командами `submit` и `list`.
+## Отправка платежей и получение результатов
+
+Поднимите Kafka и `payment-processor` из соседнего репозитория `infra` командой `docker compose -f ../infra/docker-compose.yml up -d --build payment-processor`. В отдельной консоли запустите воркеры терминала.
+
+```sh
+go run ./cmd/terminal -brokers localhost:9094 run
+```
+
+Пока работает `run`, выполняйте `submit` и `list` в другой консоли с теми же `-db` и `-terminal-id`. Используйте один экземпляр `run` и одну базу на идентификатор терминала. `-brokers` принимает адреса через запятую и по умолчанию использует `localhost:9094`. Остановить воркеры можно через `Ctrl+C`.
+
+В выводе `list` поле `sent_at` появляется после подтверждения Kafka. Поле `result` содержит финальное решение процессора `success` или `failed`. При отказе `reason` содержит код причины, например `LIMIT_EXCEEDED`. `run` также выводит полученные решения в консоль.
+
+При настройках `payment-processor` по умолчанию проверьте оба исхода через `submit`. Для `150.50` ожидается `success`, для `100000.01` — `failed` с причиной `LIMIT_EXCEEDED`.
+
+Для Raspberry Pi OS 64-bit соберите бинарник и перенесите его на Pi.
 
 ```sh
 mkdir -p .terminal

@@ -26,8 +26,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, prompts io.Write
 	flags.SetOutput(prompts)
 	id := flags.String("terminal-id", "term-001", "terminal identifier")
 	path := flags.String("db", ".terminal/queue.db", "SQLite queue file")
+	brokers := flags.String("brokers", "localhost:9094", "comma-separated Kafka addresses for run")
 	flags.Usage = func() {
-		fmt.Fprintln(prompts, "Usage: terminal [flags] <submit|list>")
+		fmt.Fprintln(prompts, "Usage: terminal [flags] <submit|list|run>")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -37,9 +38,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, prompts io.Write
 		return err
 	}
 	command := flags.Arg(0)
-	if flags.NArg() != 1 || (command != "submit" && command != "list") {
+	if flags.NArg() != 1 || (command != "submit" && command != "list" && command != "run") {
 		flags.Usage()
-		return errors.New("expected the submit or list command")
+		return errors.New("expected the submit, list or run command")
 	}
 	if !terminalIDPattern.MatchString(*id) {
 		return errors.New("terminal ID must contain 1–64 letters, digits, hyphens or underscores")
@@ -52,6 +53,10 @@ func Run(ctx context.Context, args []string, in io.Reader, out, prompts io.Write
 		return err
 	}
 	defer db.Close()
+
+	if command == "run" {
+		return runKafka(ctx, db, *id, *brokers, prompts)
+	}
 
 	encoder := json.NewEncoder(out)
 	if command == "list" {
