@@ -106,3 +106,24 @@ kill -TERM "$worker"
 wait "$worker"
 sudo poweroff
 ```
+
+## Проверки доставки
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+Из корня репозитория запустите проверку повторной доставки на локальном тестовом стенде с Kafka и `payment-processor`.
+
+```sh
+KAFKA_EXTERNAL_HOST=localhost docker compose -f ../infra/docker-compose.yml up -d --build payment-processor
+TEST_KAFKA_E2E_BROKERS=localhost:9094 go test -v -count=1 -run '^TestPaymentReplayWithKafka$' ./internal/kafka
+```
+
+Тест создаёт отдельный идентификатор терминала и временную базу SQLite. Он воспроизводит остановку после подтверждения Kafka и до записи `sent_at`, сверяет обе копии платежа в Kafka и проверяет, что процессор опубликовал одно решение. Затем тест останавливает consumer после записи результата и до коммита offset, публикует копию результата и проверяет, что после перезапуска обе доставки проходят без изменений сохранённой записи.
+
+Для ручной проверки временно остановите Kafka командой `docker compose -f ../infra/docker-compose.yml pause kafka` и выполните `submit`. Пока Kafka на паузе, `list` показывает сохранённый платёж без `sent_at`. Остановите `run`, выполните `docker compose -f ../infra/docker-compose.yml unpause kafka` и запустите `run` с теми же `-db` и `-terminal-id`. После обработки в `list` у того же `transaction_id` появится `result`.
+
+После длительной остановки терминал может дочитать результаты в пределах срока хранения `pos.transaction-results.v1`. На стенде `infra` этот срок составляет три дня.

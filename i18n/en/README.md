@@ -106,3 +106,24 @@ kill -TERM "$worker"
 wait "$worker"
 sudo poweroff
 ```
+
+## Delivery checks
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+From the repository root, run the replay check against a local test stack with Kafka and `payment-processor`.
+
+```sh
+KAFKA_EXTERNAL_HOST=localhost docker compose -f ../infra/docker-compose.yml up -d --build payment-processor
+TEST_KAFKA_E2E_BROKERS=localhost:9094 go test -v -count=1 -run '^TestPaymentReplayWithKafka$' ./internal/kafka
+```
+
+The test uses a unique terminal ID and a temporary SQLite database. It simulates a shutdown after the Kafka acknowledgement and before the `sent_at` write, compares both copies of the payment in Kafka and checks that the processor published one decision. It then stops the consumer after saving the result and before committing the offset, publishes an identical result and checks that both deliveries after restart leave the saved payment intact.
+
+To check broker downtime manually, run `docker compose -f ../infra/docker-compose.yml pause kafka` and use `submit`. While Kafka is paused, `list` shows the saved payment without `sent_at`. Stop `run`, execute `docker compose -f ../infra/docker-compose.yml unpause kafka` and start `run` with the same `-db` and `-terminal-id`. Once processing finishes, `list` shows a `result` for the same `transaction_id`.
+
+After an extended shutdown, the terminal can catch up on results still retained in `pos.transaction-results.v1`. The `infra` stack retains them for three days.

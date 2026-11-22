@@ -38,7 +38,7 @@ func TestResultConsumerReplaysAfterSaveBeforeCommit(t *testing.T) {
 	firstCtx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	persisted := make(chan error, 1)
-	_, stop := startResultConsumer(t, firstCtx, broker, resultStoreFunc(func(ctx context.Context, terminalID, transactionID string, result queue.Result) (bool, error) {
+	_, stop := startResultConsumer(t, firstCtx, broker, testTerminalID, resultStoreFunc(func(ctx context.Context, terminalID, transactionID string, result queue.Result) (bool, error) {
 		saved, err := db.SaveResult(ctx, terminalID, transactionID, result)
 		// Stop with a durable result and before Run sends the offset commit.
 		cancel()
@@ -63,7 +63,7 @@ func TestResultConsumerReplaysAfterSaveBeforeCommit(t *testing.T) {
 
 	db = openResultQueue(t, path)
 	var replayCount int
-	consumer, stop := startResultConsumer(t, t.Context(), broker, resultStoreFunc(func(ctx context.Context, terminalID, transactionID string, result queue.Result) (bool, error) {
+	consumer, stop := startResultConsumer(t, t.Context(), broker, testTerminalID, resultStoreFunc(func(ctx context.Context, terminalID, transactionID string, result queue.Result) (bool, error) {
 		replayCount++
 		saved, err := db.SaveResult(ctx, terminalID, transactionID, result)
 		if saved {
@@ -123,7 +123,7 @@ func TestResultConsumerFiltersAndStoresBeforeCommit(t *testing.T) {
 	})
 
 	var attempts []string
-	consumer, stop := startResultConsumer(t, t.Context(), broker, resultStoreFunc(func(ctx context.Context, terminalID, transactionID string, result queue.Result) (bool, error) {
+	consumer, stop := startResultConsumer(t, t.Context(), broker, testTerminalID, resultStoreFunc(func(ctx context.Context, terminalID, transactionID string, result queue.Result) (bool, error) {
 		attempts = append(attempts, transactionID)
 		if len(attempts) == 1 {
 			return false, errors.New("SQLite temporarily busy")
@@ -145,9 +145,9 @@ func TestResultConsumerFiltersAndStoresBeforeCommit(t *testing.T) {
 	}
 }
 
-func startResultConsumer(t *testing.T, parent context.Context, brokers []string, store ResultStore) (*ResultConsumer, func()) {
+func startResultConsumer(t *testing.T, parent context.Context, brokers []string, terminalID string, store ResultStore) (*ResultConsumer, func()) {
 	t.Helper()
-	consumer, err := NewResultConsumer(brokers, testTerminalID)
+	consumer, err := NewResultConsumer(brokers, terminalID)
 	if err != nil {
 		t.Fatal(err)
 	}
