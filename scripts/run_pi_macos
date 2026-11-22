@@ -2,6 +2,7 @@
 """Boot a local Raspberry Pi OS Lite image in QEMU on macOS."""
 
 import argparse
+import base64
 import fcntl
 import gzip
 import os
@@ -12,10 +13,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 REPO = Path(__file__).resolve().parent.parent
 DTB = "bcm2711-rpi-4-b.dtb"
+QEMU_DTB = "qemu.dtb"
 
 
 def prepare_disk(image, vm, username):
@@ -72,10 +75,24 @@ def prepare_disk(image, vm, username):
             subprocess.run(["hdiutil", "detach", whole_disk],
                            check=True, stdout=subprocess.DEVNULL)
 
-        # QEMU exposes PL011 as the terminal; the stock DTB assigns it to Bluetooth.
-        subprocess.run(["fdtput", "-t", "s", staging / DTB,
-                        "/soc/serial@7e201000/bluetooth", "status", "disabled"], check=True)
+        prepare_dtb(staging)
         staging.rename(vm)
+
+
+def prepare_dtb(vm):
+    with tempfile.TemporaryDirectory(dir=vm) as directory:
+        dtb = Path(directory) / QEMU_DTB
+        shutil.copyfile(vm / DTB, dtb)
+        # Keep PL011 for the console and use the DWC2 host driver for the virtual NIC.
+        usb = "/soc/usb@7e980000"
+        for node, prop, value in (
+            ("/soc/serial@7e201000/bluetooth", "status", "disabled"),
+            (usb, "compatible", "brcm,bcm2835-usb"),
+            (usb, "dr_mode", "host"),
+            (usb, "status", "okay"),
+        ):
+            subprocess.run(["fdtput", "-t", "s", dtb, node, prop, value], check=True)
+        dtb.replace(vm / QEMU_DTB)
 
 
 def main():
@@ -111,10 +128,17 @@ def main():
             prepare_disk(image, vm, args.user)
         elif args.user:
             parser.error("--user applies when creating a new local SD card.")
+        else:
+            prepare_dtb(vm)
         root = (vm / "root-device").read_text()
-        # Keep the kernel's Pi power-off handler, but leave the watchdog timer off in systemd.
+        # Configure only the virtual NIC through systemd-network-generator at boot.
+        network = "[Match]\nName=usb0\n[Network]\nDHCP=ipv4\n"
+        credential = base64.b64encode(network.encode()).decode()
+        # Seed the guest clock before NTP and keep the systemd watchdog off for power-off.
         cmdline = (
             f"console=ttyAMA1,115200 root={root} rootfstype=ext4 fsck.repair=yes rootwait rw "
+            f"systemd.clock-usec={time.time_ns() // 1000} "
+            f"systemd.set_credential_binary=network.network.10-qemu:{credential} "
             "systemd.watchdog_sec=off "
             "systemd.mask=systemd-networkd-wait-online.service"
         )
@@ -122,8 +146,9 @@ def main():
         os.set_inheritable(lock.fileno(), True)
         command = [
             "qemu-system-aarch64", "-M", "raspi4b", "-m", "2G", "-smp", "4",
-            "-kernel", "Image", "-dtb", DTB, "-append", cmdline,
-            "-drive", "file=sd.img,format=raw,if=sd", "-nic", "none",
+            "-kernel", "Image", "-dtb", QEMU_DTB, "-append", cmdline,
+            "-drive", "file=sd.img,format=raw,if=sd",
+            "-netdev", "user,id=net0", "-device", "usb-net,netdev=net0",
             "-display", "none", "-serial", "mon:stdio",
         ]
         os.execvp(command[0], command)
